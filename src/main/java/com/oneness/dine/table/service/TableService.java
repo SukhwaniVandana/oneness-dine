@@ -5,6 +5,7 @@ import com.oneness.dine.auth.repository.UserSessionRepository;
 import com.oneness.dine.core.enums.TableStatus;
 import com.oneness.dine.core.exception.BusinessException;
 import com.oneness.dine.core.exception.ResourceNotFoundException;
+import com.oneness.dine.order.repository.CustomerOrderRepository;
 import com.oneness.dine.restaurant.entity.Branch;
 import com.oneness.dine.restaurant.repository.BranchRepository;
 import com.oneness.dine.table.dto.*;
@@ -30,6 +31,7 @@ public class TableService {
     private final RestaurantTableRepository  tableRepository;
     private final BranchRepository           branchRepository;
     private final UserSessionRepository      sessionRepository;
+    private final CustomerOrderRepository orderRepository;
 
     private Branch getBranch(Long branchId) {
         return branchRepository.findById(branchId)
@@ -241,18 +243,44 @@ public class TableService {
     public List<TableDashboardDto> getDashboard(Long branchId) {
         return tableRepository.findDashboardTables(branchId)
                 .stream()
-                .map(table -> TableDashboardDto.builder()
-                        .tableId(table.getId())
-                        .tableNumber(table.getTableNumber())
-                        .sectionName(table.getSection().getName())
-                        .capacity(table.getCapacity())
-                        .tableStatus(table.getTableStatus())
-                        .isLocked(table.getLockedBySession() != null)
-                        .isMerged(table.getIsMerged())
-                        .mergedWithTableId(table.getMergedWithTable() != null ?
-                                table.getMergedWithTable().getId() : null)
-                        .activeOrders(List.of())
-                        .build())
+                .map(table -> {
+                    // fetch active orders for this table
+                    List<com.oneness.dine.order.entity.CustomerOrder>
+                            activeOrders = orderRepository
+                            .findByTableIdAndIsSettledFalseAndDeletedAtIsNull(
+                                    table.getId());
+                    // map to order summary with timer info
+                    List<TableDashboardDto.TableOrderSummary> orderSummaries =
+                            activeOrders.stream()
+                                    .map(order -> TableDashboardDto
+                                            .TableOrderSummary.builder()
+                                            .orderId(order.getId())
+                                            .orderSessionTag(order.getOrderSessionTag())
+                                            .sessionOrderIndex(order.getSessionOrderIndex())
+                                            .sessionStartedAt(order.getSessionStartedAt())
+                                            .paxCount(order.getPaxCount())
+                                            .isPrinted(order.getIsPrinted())
+                                            .isSettled(order.getIsSettled())
+                                            .itemCount(0)
+                                            .waiterName(order.getWaiterUser() != null ?
+                                                    order.getWaiterUser().getFullName() : null)
+                                            .build())
+                                    .collect(Collectors.toList());
+
+                    return TableDashboardDto.builder()
+                            .tableId(table.getId())
+                            .tableNumber(table.getTableNumber())
+                            .sectionName(table.getSection().getName())
+                            .capacity(table.getCapacity())
+                            .tableStatus(table.getTableStatus())
+                            .isLocked(table.getLockedBySession() != null)
+                            .isMerged(table.getIsMerged())
+                            .mergedWithTableId(
+                                    table.getMergedWithTable() != null ?
+                                            table.getMergedWithTable().getId() : null)
+                            .activeOrders(orderSummaries) // [CHANGED]
+                            .build();
+                })
                 .collect(Collectors.toList());
     }
 
