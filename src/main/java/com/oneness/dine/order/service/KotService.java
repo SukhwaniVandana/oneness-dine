@@ -1,0 +1,238 @@
+package com.oneness.dine.order.service;
+
+import com.oneness.dine.auth.repository.UserSessionRepository;
+import com.oneness.dine.core.enums.KotDisplayStatus;
+import com.oneness.dine.core.enums.KotType;
+import com.oneness.dine.core.enums.OrderStatus;
+import com.oneness.dine.core.exception.BusinessException;
+import com.oneness.dine.core.exception.ResourceNotFoundException;
+import com.oneness.dine.menu.entity.KitchenStation;
+import com.oneness.dine.menu.repository.KitchenStationRepository;
+import com.oneness.dine.order.dto.*;
+import com.oneness.dine.order.entity.CustomerOrder;
+import com.oneness.dine.order.entity.Kot;
+import com.oneness.dine.order.entity.KotItem;
+import com.oneness.dine.order.entity.OrderItem;
+import com.oneness.dine.order.repository.CustomerOrderRepository;
+import com.oneness.dine.order.repository.KotItemRepository;
+import com.oneness.dine.order.repository.KotRepository;
+import com.oneness.dine.order.repository.OrderItemRepository;
+import com.oneness.dine.restaurant.repository.BranchRepository;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.time.LocalDateTime;
+import java.util.List;
+import java.util.stream.Collectors;
+
+@Slf4j
+@Service
+@RequiredArgsConstructor
+public class KotService {
+
+    private final KotRepository          kotRepository;
+    private final KotItemRepository      kotItemRepository;
+    private final CustomerOrderRepository orderRepository;
+    private final OrderItemRepository    orderItemRepository;
+    private final KitchenStationRepository stationRepository;
+    private final UserSessionRepository  sessionRepository;
+    private final BranchRepository       branchRepository;
+
+    // ─── GENERATE KOT NUMBER ─────────────────────────
+
+    private String generateKotNumber(Long branchId) {
+        return kotRepository
+                .findTopByBranchIdOrderByCreatedAtDesc(branchId)
+                .map(k -> {
+                    String num = k.getKotNumber()
+                            .replace("KOT-", "");
+                    try {
+                        return String.format("KOT-%04d",
+                                Integer.parseInt(num) + 1);
+                    } catch (NumberFormatException e) {
+                        return "KOT-0001";
+                    }
+                })
+                .orElse("KOT-0001");
+    }
+
+    // ─── CREATE KOT ──────────────────────────────────
+
+    @Transactional
+    public KotDto createKot(KotRequest request) {
+        CustomerOrder order = orderRepository
+                .findById(request.getOrderId())
+                .orElseThrow(() -> new ResourceNotFoundException(
+                        "Order", "id", request.getOrderId()));
+
+        if (order.getIsSettled()) {
+            throw new BusinessException(
+                    "Cannot create KOT for settled order",
+                    "ORDER_SETTLED");
+        }
+
+        // Build KOT
+        Kot kot = new Kot();
+        kot.setOrder(order);
+        kot.setBranch(order.getBranch());
+        kot.setKotNumber(generateKotNumber(order.getBranch().getId()));
+        kot.setKotType(KotType.valueOf(
+                request.getKotType() != null ?
+                request.getKotType() : "NEW"));
+        kot.setDisplayStatus(KotDisplayStatus.PENDING);
+        kot.setIsPrinted(false);
+
+        // Set table snapshot
+        if (order.getTable() != null) {
+            kot.setTableNumberSnapshot(
+                    order.getTable().getTableNumber());
+        }
+
+        // Link kitchen station
+        if (request.getStationId() != null) {
+            KitchenStation station = stationRepository
+                    .findById(request.getStationId())
+                    .orElseThrow(() -> new ResourceNotFoundException(
+                            "KitchenStation", "id",
+                            request.getStationId()));
+            kot.setStation(station);
+        }
+
+        Kot savedKot = kotRepository.save(kot);
+
+        // Add KOT items
+        for (KotItemRequest itemReq : request.getItems()) {
+            OrderItem orderItem = orderItemRepository
+                    .findById(itemReq.getOrderItemId())
+                    .orElseThrow(() -> new ResourceNotFoundException(
+                            "OrderItem", "id",
+                            itemReq.getOrderItemId()));
+
+            KotItem kotItem = new KotItem();
+            kotItem.setKot(savedKot);
+            kotItem.setOrderItem(orderItem);
+            kotItem.setItemNameSnapshot(
+                    orderItem.getItemNameSnapshot());
+            kotItem.setQuantity(itemReq.getQuantity());
+            kotItem.setAction(itemReq.getAction());
+            kotItem.setSpecialInstruction(
+                    itemReq.getSpecialInstruction());
+            kotItem.setKitchenStatus(KotDisplayStatus.PENDING);
+            kotItemRepository.save(kotItem);
+
+            // Update kot_quantity on order item
+            orderItem.setKotQuantity(
+                    orderItem.getKotQuantity() +
+                    itemReq.getQuantity());
+            orderItem.setItemStatus(OrderStatus.KOT_SENT);
+            orderItemRepository.save(orderItem);
+        }
+
+        // Update order status
+        order.setOrderStatus(OrderStatus.KOT_SENT);
+        orderRepository.save(order);
+
+        log.info("KOT created: {} for order: {}",
+                savedKot.getKotNumber(), order.getOrderNumber());
+        return toKotDto(savedKot);
+    }
+
+    // ─── GET KOTs ────────────────────────────────────
+
+    @Transactional(readOnly = true)
+    public List<KotDto> getPendingKots(Long branchId) {
+        return kotRepository
+                .findByBranchIdAndDisplayStatusInOrderByCreatedAtAsc(
+                        branchId,
+                        List.of(KotDisplayStatus.PENDING,
+                                KotDisplayStatus.PREPARING))
+                .stream().map(this::toKotDto)
+                .collect(Collectors.toList());
+    }
+
+    @Transactional(readOnly = true)
+    public List<KotDto> getKotsByOrder(Long orderId) {
+        return kotRepository.findByOrderId(orderId)
+                .stream().map(this::toKotDto)
+                .collect(Collectors.toList());
+    }
+
+    // ─── UPDATE KOT STATUS ───────────────────────────
+
+    @Transactional
+    public KotDto updateKotStatus(Long kotId,
+                                   UpdateKotStatusRequest request) {
+        Kot kot = kotRepository.findById(kotId)
+                .orElseThrow(() -> new ResourceNotFoundException(
+                        "KOT", "id", kotId));
+
+        kot.setDisplayStatus(request.getDisplayStatus());
+
+        // If marked ready — update order status
+        if (request.getDisplayStatus() == KotDisplayStatus.READY) {
+            CustomerOrder order = kot.getOrder();
+            order.setOrderStatus(OrderStatus.READY);
+            orderRepository.save(order);
+            log.info("KOT {} marked READY — order {} updated",
+                    kot.getKotNumber(), order.getOrderNumber());
+        }
+
+        return toKotDto(kotRepository.save(kot));
+    }
+
+    // ─── UPDATE KOT ITEM STATUS ──────────────────────
+
+    @Transactional
+    public KotItemDto updateKotItemStatus(Long kotId,
+                                           Long kotItemId,
+                                           KotDisplayStatus status) {
+        KotItem kotItem = kotItemRepository.findById(kotItemId)
+                .orElseThrow(() -> new ResourceNotFoundException(
+                        "KotItem", "id", kotItemId));
+        kotItem.setKitchenStatus(status);
+        KotItem saved = kotItemRepository.save(kotItem);
+        log.info("KOT item {} status updated to: {}",
+                kotItemId, status);
+        return toKotItemDto(saved);
+    }
+
+    // ─── MAPPERS ─────────────────────────────────────
+
+    public KotDto toKotDto(Kot kot) {
+        List<KotItemDto> items = kotItemRepository
+                .findByKotId(kot.getId())
+                .stream().map(this::toKotItemDto)
+                .collect(Collectors.toList());
+
+        return KotDto.builder()
+                .id(kot.getId())
+                .orderId(kot.getOrder().getId())
+                .orderNumber(kot.getOrder().getOrderNumber())
+                .kotNumber(kot.getKotNumber())
+                .kotType(kot.getKotType())
+                .tableNumber(kot.getTableNumberSnapshot())
+                .stationId(kot.getStation() != null ?
+                        kot.getStation().getId() : null)
+                .stationName(kot.getStation() != null ?
+                        kot.getStation().getName() : null)
+                .displayStatus(kot.getDisplayStatus())
+                .isPrinted(kot.getIsPrinted())
+                .createdAt(kot.getCreatedAt())
+                .items(items)
+                .build();
+    }
+
+    private KotItemDto toKotItemDto(KotItem item) {
+        return KotItemDto.builder()
+                .id(item.getId())
+                .orderItemId(item.getOrderItem().getId())
+                .itemName(item.getItemNameSnapshot())
+                .quantity(item.getQuantity())
+                .action(item.getAction())
+                .kitchenStatus(item.getKitchenStatus())
+                .specialInstruction(item.getSpecialInstruction())
+                .build();
+    }
+}
