@@ -45,7 +45,9 @@ public class SecurityConfig {
                                 "/api-docs/**",
                                 "/api-docs",
                                 "/v3/api-docs/**",
-                                "/v3/api-docs"
+                                "/v3/api-docs",
+                                "/api/v1/platform/webhook/swiggy",
+                                "/api/v1/platform/webhook/zomato"
                         ).permitAll()
                         .anyRequest().authenticated()
                 )
