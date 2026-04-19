@@ -7,5 +7,7 @@ public enum PaymentMethod {
     WALLET,
     CREDIT,
     ONLINE,
-    COMPLIMENTARY
+    COMPLIMENTARY,
+    BANK_TRANSFER,
+    CHEQUE
 }
