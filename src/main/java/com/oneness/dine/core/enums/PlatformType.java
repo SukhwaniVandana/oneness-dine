@@ -4,5 +4,6 @@ public enum PlatformType {
     NONE,
     SWIGGY,
     ZOMATO,
+    DUNZO,
     OTHER
 }
