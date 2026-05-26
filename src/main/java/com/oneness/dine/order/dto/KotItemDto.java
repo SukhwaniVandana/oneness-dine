@@ -16,4 +16,5 @@ public class KotItemDto {
     private String           action;
     private KotDisplayStatus kitchenStatus;
     private String           specialInstruction;
+    private String           categoryName;
 }

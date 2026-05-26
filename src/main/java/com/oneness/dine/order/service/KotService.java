@@ -1,5 +1,11 @@
 package com.oneness.dine.order.service;
 
+import java.util.List;
+import java.util.stream.Collectors;
+
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
 import com.oneness.dine.auth.repository.UserSessionRepository;
 import com.oneness.dine.core.enums.KotDisplayStatus;
 import com.oneness.dine.core.enums.KotType;
@@ -8,7 +14,11 @@ import com.oneness.dine.core.exception.BusinessException;
 import com.oneness.dine.core.exception.ResourceNotFoundException;
 import com.oneness.dine.menu.entity.KitchenStation;
 import com.oneness.dine.menu.repository.KitchenStationRepository;
-import com.oneness.dine.order.dto.*;
+import com.oneness.dine.order.dto.KotDto;
+import com.oneness.dine.order.dto.KotItemDto;
+import com.oneness.dine.order.dto.KotItemRequest;
+import com.oneness.dine.order.dto.KotRequest;
+import com.oneness.dine.order.dto.UpdateKotStatusRequest;
 import com.oneness.dine.order.entity.CustomerOrder;
 import com.oneness.dine.order.entity.Kot;
 import com.oneness.dine.order.entity.KotItem;
@@ -18,14 +28,9 @@ import com.oneness.dine.order.repository.KotItemRepository;
 import com.oneness.dine.order.repository.KotRepository;
 import com.oneness.dine.order.repository.OrderItemRepository;
 import com.oneness.dine.restaurant.repository.BranchRepository;
+
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
-
-import java.time.LocalDateTime;
-import java.util.List;
-import java.util.stream.Collectors;
 
 @Slf4j
 @Service
@@ -142,9 +147,14 @@ public class KotService {
                 .findByBranchIdAndDisplayStatusInOrderByCreatedAtAsc(
                         branchId,
                         List.of(KotDisplayStatus.PENDING,
-                                KotDisplayStatus.PREPARING))
-                .stream().map(this::toKotDto)
-                .collect(Collectors.toList());
+                                KotDisplayStatus.PREPARING,
+                                KotDisplayStatus.READY,    // [NEW]
+                                KotDisplayStatus.SERVED))  // [NEW] unsettled orders only
+                        .stream()
+                        /* Filter out SERVED KOTs where order is already settled */
+                        .filter(kot -> !kot.getOrder().getIsSettled())
+                        .map(this::toKotDto)
+                        .collect(Collectors.toList());
     }
 
     @Transactional(readOnly = true)
@@ -285,6 +295,7 @@ public class KotService {
                 .action(item.getAction())
                 .kitchenStatus(item.getKitchenStatus())
                 .specialInstruction(item.getSpecialInstruction())
+                .categoryName(item.getOrderItem().getItem() != null ? item.getOrderItem().getItem().getCategory().getName() : null)
                 .build();
     }
 }
