@@ -264,6 +264,7 @@ public class TableService {
                                             .itemCount(0)
                                             .waiterName(order.getWaiterUser() != null ?
                                                     order.getWaiterUser().getFullName() : null)
+                                            .orderStatus(order.getOrderStatus()) // [NEW]
                                             .build())
                                     .collect(Collectors.toList());
 
@@ -278,7 +279,7 @@ public class TableService {
                             .mergedWithTableId(
                                     table.getMergedWithTable() != null ?
                                             table.getMergedWithTable().getId() : null)
-                            .activeOrders(orderSummaries) // [CHANGED]
+                            .activeOrders(orderSummaries)
                             .build();
                 })
                 .collect(Collectors.toList());

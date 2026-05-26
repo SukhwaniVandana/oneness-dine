@@ -1,5 +1,6 @@
 package com.oneness.dine.table.dto;
 
+import com.oneness.dine.core.enums.OrderStatus;   // [NEW]
 import com.oneness.dine.core.enums.TableStatus;
 import lombok.Builder;
 import lombok.Getter;
@@ -32,11 +33,12 @@ public class TableDashboardDto {
         private Long          orderId;
         private String        orderSessionTag;
         private Integer       sessionOrderIndex;
-        private LocalDateTime sessionStartedAt;  // for timer calculation
+        private LocalDateTime sessionStartedAt;   // for timer calculation
         private Integer       paxCount;
-        private Boolean       isPrinted;          // true = GREEN box
+        private Boolean       isPrinted;           // physical print only
         private Boolean       isSettled;
         private Integer       itemCount;
         private String        waiterName;
+        private OrderStatus   orderStatus;          // [NEW] — for YELLOW vs GREEN dashboard color
     }
 }

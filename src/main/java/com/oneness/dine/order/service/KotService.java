@@ -32,13 +32,13 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class KotService {
 
-    private final KotRepository          kotRepository;
-    private final KotItemRepository      kotItemRepository;
+    private final KotRepository           kotRepository;
+    private final KotItemRepository       kotItemRepository;
     private final CustomerOrderRepository orderRepository;
-    private final OrderItemRepository    orderItemRepository;
+    private final OrderItemRepository     orderItemRepository;
     private final KitchenStationRepository stationRepository;
-    private final UserSessionRepository  sessionRepository;
-    private final BranchRepository       branchRepository;
+    private final UserSessionRepository   sessionRepository;
+    private final BranchRepository        branchRepository;
 
     // ─── GENERATE KOT NUMBER ─────────────────────────
 
@@ -113,23 +113,18 @@ public class KotService {
             KotItem kotItem = new KotItem();
             kotItem.setKot(savedKot);
             kotItem.setOrderItem(orderItem);
-            kotItem.setItemNameSnapshot(
-                    orderItem.getItemNameSnapshot());
+            kotItem.setItemNameSnapshot(orderItem.getItemNameSnapshot());
             kotItem.setQuantity(itemReq.getQuantity());
             kotItem.setAction(itemReq.getAction());
-            kotItem.setSpecialInstruction(
-                    itemReq.getSpecialInstruction());
+            kotItem.setSpecialInstruction(itemReq.getSpecialInstruction());
             kotItem.setKitchenStatus(KotDisplayStatus.PENDING);
             kotItemRepository.save(kotItem);
 
-            // Update kot_quantity on order item
-            orderItem.setKotQuantity(
-                    orderItem.getKotQuantity() +
-                    itemReq.getQuantity());
+            // Update kot_quantity on order item    
+            orderItem.setKotQuantity(orderItem.getKotQuantity() + itemReq.getQuantity());
             orderItem.setItemStatus(OrderStatus.KOT_SENT);
             orderItemRepository.save(orderItem);
         }
-
         // Update order status
         order.setOrderStatus(OrderStatus.KOT_SENT);
         orderRepository.save(order);
@@ -168,15 +163,61 @@ public class KotService {
                 .orElseThrow(() -> new ResourceNotFoundException(
                         "KOT", "id", kotId));
 
-        kot.setDisplayStatus(request.getDisplayStatus());
+        KotDisplayStatus newStatus = request.getDisplayStatus();
+        kot.setDisplayStatus(newStatus);
 
-        // If marked ready — update order status
-        if (request.getDisplayStatus() == KotDisplayStatus.READY) {
+        // Fetch all KOT items for this KOT
+        List<KotItem> kotItems = kotItemRepository.findByKotId(kotId); // [NEW]
+
+        if (newStatus == KotDisplayStatus.PREPARING) {
+            // [NEW] Cascade PREPARING to all kot_items and order_items
+            for (KotItem kotItem : kotItems) {
+                kotItem.setKitchenStatus(KotDisplayStatus.PREPARING);
+                kotItemRepository.save(kotItem);
+
+                OrderItem orderItem = kotItem.getOrderItem();
+                orderItem.setItemStatus(OrderStatus.IN_PROGRESS);
+                orderItemRepository.save(orderItem);
+            }
+            log.info("KOT {} marked PREPARING — {} items updated",
+                    kot.getKotNumber(), kotItems.size());
+        }
+
+        if (newStatus == KotDisplayStatus.READY) {
+            // [NEW] Cascade READY to all kot_items and order_items
+            for (KotItem kotItem : kotItems) {
+                kotItem.setKitchenStatus(KotDisplayStatus.READY);
+                kotItemRepository.save(kotItem);
+
+                OrderItem orderItem = kotItem.getOrderItem();
+                orderItem.setItemStatus(OrderStatus.READY);
+                orderItemRepository.save(orderItem);
+            }
+
+            // Update order status to READY (existing behaviour ✅)
             CustomerOrder order = kot.getOrder();
             order.setOrderStatus(OrderStatus.READY);
             orderRepository.save(order);
-            log.info("KOT {} marked READY — order {} updated",
-                    kot.getKotNumber(), order.getOrderNumber());
+            log.info("KOT {} marked READY — order {} and {} items updated",
+                    kot.getKotNumber(), order.getOrderNumber(), kotItems.size());
+        }
+
+        if (newStatus == KotDisplayStatus.SERVED) {
+            // [NEW] Cascade SERVED to all kot_items and order_items
+            for (KotItem kotItem : kotItems) {
+                kotItem.setKitchenStatus(KotDisplayStatus.SERVED);
+                kotItemRepository.save(kotItem);
+
+                OrderItem orderItem = kotItem.getOrderItem();
+                orderItem.setItemStatus(OrderStatus.SERVED);
+                orderItemRepository.save(orderItem);
+            }
+            // [NEW] Also update customer_order.orderStatus = SERVED
+            CustomerOrder order = kot.getOrder();
+            order.setOrderStatus(OrderStatus.SERVED);
+            orderRepository.save(order);
+            log.info("KOT {} marked SERVED — order {} and {} items updated",
+                    kot.getKotNumber(), order.getOrderNumber(), kotItems.size());
         }
 
         return toKotDto(kotRepository.save(kot));
@@ -192,9 +233,20 @@ public class KotService {
                 .orElseThrow(() -> new ResourceNotFoundException(
                         "KotItem", "id", kotItemId));
         kotItem.setKitchenStatus(status);
+
+        // [NEW] Also cascade to order_item.itemStatus
+        OrderItem orderItem = kotItem.getOrderItem();
+        switch (status) {
+            case PREPARING -> orderItem.setItemStatus(OrderStatus.IN_PROGRESS);
+            case READY     -> orderItem.setItemStatus(OrderStatus.READY);
+            case SERVED    -> orderItem.setItemStatus(OrderStatus.SERVED);
+            default        -> { /* PENDING — no change to order item */ }
+        }
+        orderItemRepository.save(orderItem);
+
         KotItem saved = kotItemRepository.save(kotItem);
-        log.info("KOT item {} status updated to: {}",
-                kotItemId, status);
+        log.info("KOT item {} status updated to: {} — order item {} updated",
+                kotItemId, status, orderItem.getId());
         return toKotItemDto(saved);
     }
 
