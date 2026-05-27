@@ -57,10 +57,109 @@ public class BillingService {
     }
 
     // ─── CALCULATE LOYALTY POINTS ──────────────────────
-    // 1 point per 100 rupees spent
     private Integer calculateLoyaltyPoints(BigDecimal totalAmount) {
         return totalAmount.divide(
                 BigDecimal.valueOf(100), 0, RoundingMode.FLOOR).intValue();
+    }
+
+    // ─── CORE CALCULATION ──────────────────────────────
+    /*
+     * Item-wise calculation (discount first, then GST):
+     *
+     * For each item:
+     *   itemSubtotal   = unitPrice × quantity
+     *   itemTaxable    = itemSubtotal × (1 - discountPct/100)
+     *   itemCGST       = itemTaxable × cgstPct/100
+     *   itemSGST       = itemTaxable × sgstPct/100
+     *   itemIGST       = itemTaxable × igstPct/100
+     *   itemCess       = itemTaxable × cessPct/100
+     *   itemTotal      = itemTaxable + itemCGST + itemSGST + itemIGST + itemCess
+     *
+     * Order totals:
+     *   subtotal       = Σ itemSubtotal
+     *   orderDiscount  = Σ (itemSubtotal - itemTaxable)  [= subtotal × discountPct/100]
+     *   cgstTotal      = Σ itemCGST
+     *   sgstTotal      = Σ itemSGST
+     *   igstTotal      = Σ itemIGST
+     *   cessTotal      = Σ itemCess
+     *   serviceCharge  = (Σ itemTaxable) × serviceChargePct/100
+     *   grandTotal     = Σ itemTotal + serviceCharge + packagingCharge + roundOff
+     */
+    private BillCalculation calculateBill(
+            List<OrderItem> items,
+            BigDecimal discountPct,
+            BigDecimal serviceChargePct,
+            BigDecimal packagingCharge) {
+
+        BigDecimal subtotal      = BigDecimal.ZERO;
+        BigDecimal orderDiscount = BigDecimal.ZERO;
+        BigDecimal totalTaxable  = BigDecimal.ZERO;
+        BigDecimal cgstTotal     = BigDecimal.ZERO;
+        BigDecimal sgstTotal     = BigDecimal.ZERO;
+        BigDecimal igstTotal     = BigDecimal.ZERO;
+        BigDecimal cessTotal     = BigDecimal.ZERO;
+
+        for (OrderItem item : items) {
+            if (item.getIsComplimentary()) continue;
+
+            // itemSubtotal — before any discount
+            BigDecimal itemSubtotal = item.getUnitPriceSnapshot()
+                    .multiply(BigDecimal.valueOf(item.getQuantity()))
+                    .subtract(item.getDiscountAmount()); // item-level discount if any
+
+            // itemTaxable — after order-level discount percentage
+            BigDecimal itemTaxable = itemSubtotal
+                    .multiply(BigDecimal.ONE.subtract(
+                            discountPct.divide(BigDecimal.valueOf(100), 10, RoundingMode.HALF_UP)))
+                    .setScale(2, RoundingMode.HALF_UP);
+
+            subtotal      = subtotal.add(itemSubtotal);
+            orderDiscount = orderDiscount.add(itemSubtotal.subtract(itemTaxable));
+            totalTaxable  = totalTaxable.add(itemTaxable);
+
+            // GST on taxable amount (CGST+SGST for intra-state OR IGST for inter-state)
+            // cess always applies if set
+            if (item.getItem().getTaxGroup() != null) {
+                var tg = item.getItem().getTaxGroup();
+
+                cgstTotal = cgstTotal.add(itemTaxable
+                        .multiply(tg.getCgstPct())
+                        .divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP));
+
+                sgstTotal = sgstTotal.add(itemTaxable
+                        .multiply(tg.getSgstPct())
+                        .divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP));
+
+                igstTotal = igstTotal.add(itemTaxable
+                        .multiply(tg.getIgstPct())
+                        .divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP));
+
+                cessTotal = cessTotal.add(itemTaxable
+                        .multiply(tg.getCessPct())
+                        .divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP));
+            }
+        }
+
+        // Service charge on total taxable amount
+        BigDecimal serviceCharge = totalTaxable
+                .multiply(serviceChargePct)
+                .divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP);
+
+        // Grand total before round off
+        BigDecimal totalBeforeRoundOff = totalTaxable
+                .add(cgstTotal).add(sgstTotal)
+                .add(igstTotal).add(cessTotal)
+                .add(serviceCharge)
+                .add(packagingCharge != null ? packagingCharge : BigDecimal.ZERO);
+
+        BigDecimal roundedTotal = totalBeforeRoundOff.setScale(0, RoundingMode.HALF_UP);
+        BigDecimal roundOff     = roundedTotal.subtract(totalBeforeRoundOff);
+
+        return new BillCalculation(
+                subtotal, orderDiscount, totalTaxable,
+                cgstTotal, sgstTotal, igstTotal, cessTotal,
+                serviceCharge, roundOff, roundedTotal
+        );
     }
 
     // ─── GENERATE BILL ─────────────────────────────────
@@ -78,11 +177,9 @@ public class BillingService {
                         "Order", "id", request.getOrderId()));
 
         if (order.getIsSettled()) {
-            throw new BusinessException(
-                    "Order is already settled", "ORDER_SETTLED");
+            throw new BusinessException("Order is already settled", "ORDER_SETTLED");
         }
 
-        // Performance: single query, filter in memory
         List<OrderItem> items = orderItemRepository
                 .findByOrderId(order.getId())
                 .stream()
@@ -90,95 +187,42 @@ public class BillingService {
                 .collect(Collectors.toList());
 
         if (items.isEmpty()) {
-            throw new BusinessException(
-                    "No items found for billing", "NO_ITEMS");
+            throw new BusinessException("No items found for billing", "NO_ITEMS");
         }
 
-        // ── Calculate subtotal ──────────────────────────
-        BigDecimal subtotal = items.stream()
-                .filter(i -> !i.getIsComplimentary())
-                .map(i -> i.getUnitPriceSnapshot()
-                        .multiply(BigDecimal.valueOf(i.getQuantity()))
-                        .subtract(i.getDiscountAmount()))
-                .reduce(BigDecimal.ZERO, BigDecimal::add);
+        // Initial generation always uses discountPct = 0
+        BigDecimal discountPct = BigDecimal.ZERO;
 
-        BigDecimal itemDiscount = items.stream()
-                .map(OrderItem::getDiscountAmount)
-                .reduce(BigDecimal.ZERO, BigDecimal::add);
-
-        BigDecimal orderDiscount = request.getOrderDiscount() != null ?
-                request.getOrderDiscount() : BigDecimal.ZERO;
-
-        // ── Service charge from branch settings ─────────
         BigDecimal serviceChargePct = branchSettingsRepository
                 .findByBranchId(order.getBranch().getId())
                 .map(s -> s.getServiceChargePct())
                 .orElse(BigDecimal.ZERO);
 
-        BigDecimal taxableAmount = subtotal.subtract(orderDiscount);
+        BigDecimal packagingCharge = request.getPackagingCharge() != null
+                ? request.getPackagingCharge() : BigDecimal.ZERO;
 
-        BigDecimal serviceCharge = taxableAmount
-                .multiply(serviceChargePct)
-                .divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP);
+        BillCalculation calc = calculateBill(
+                items, discountPct, serviceChargePct, packagingCharge);
 
-        // ── Calculate GST per item tax group ────────────
-        BigDecimal cgstTotal = BigDecimal.ZERO;
-        BigDecimal sgstTotal = BigDecimal.ZERO;
-        BigDecimal igstTotal = BigDecimal.ZERO;
-        BigDecimal cessTotal = BigDecimal.ZERO;
+        Integer pointsEarned = calculateLoyaltyPoints(calc.totalAmount);
 
-        for (OrderItem item : items) {
-            if (item.getIsComplimentary()) continue;
-            if (item.getItem().getTaxGroup() == null) continue;
-
-            BigDecimal itemTotal = item.getUnitPriceSnapshot()
-                    .multiply(BigDecimal.valueOf(item.getQuantity()))
-                    .subtract(item.getDiscountAmount());
-
-            var tg = item.getItem().getTaxGroup();
-            cgstTotal = cgstTotal.add(itemTotal.multiply(tg.getCgstPct())
-                    .divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP));
-            sgstTotal = sgstTotal.add(itemTotal.multiply(tg.getSgstPct())
-                    .divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP));
-            igstTotal = igstTotal.add(itemTotal.multiply(tg.getIgstPct())
-                    .divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP));
-            cessTotal = cessTotal.add(itemTotal.multiply(tg.getCessPct())
-                    .divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP));
-        }
-
-        BigDecimal packagingCharge = request.getPackagingCharge() != null ?
-                request.getPackagingCharge() : BigDecimal.ZERO;
-
-        // ── Round off ───────────────────────────────────
-        BigDecimal totalBeforeRoundOff = subtotal
-                .subtract(orderDiscount)
-                .add(cgstTotal).add(sgstTotal)
-                .add(igstTotal).add(cessTotal)
-                .add(serviceCharge).add(packagingCharge);
-
-        BigDecimal roundedTotal = totalBeforeRoundOff
-                .setScale(0, RoundingMode.HALF_UP);
-        BigDecimal roundOff = roundedTotal.subtract(totalBeforeRoundOff);
-
-        Integer pointsEarned = calculateLoyaltyPoints(roundedTotal);
-
-        // ── Build and save bill ─────────────────────────
         Bill bill = new Bill();
         bill.setOrder(order);
         bill.setBranch(order.getBranch());
         bill.setBillNumber(generateBillNumber(order.getBranch().getId()));
-        bill.setSubtotal(subtotal);
-        bill.setItemDiscount(itemDiscount);
-        bill.setOrderDiscount(orderDiscount);
+        bill.setSubtotal(calc.subtotal);
+        bill.setItemDiscount(BigDecimal.ZERO);
+        bill.setOrderDiscount(calc.orderDiscount);
+        bill.setDiscountPct(discountPct);                                // [NEW]
         bill.setDiscountReason(request.getDiscountReason());
-        bill.setCgstAmount(cgstTotal);
-        bill.setSgstAmount(sgstTotal);
-        bill.setIgstAmount(igstTotal);
-        bill.setCessAmount(cessTotal);
-        bill.setServiceCharge(serviceCharge);
+        bill.setCgstAmount(calc.cgstTotal);
+        bill.setSgstAmount(calc.sgstTotal);
+        bill.setIgstAmount(calc.igstTotal);
+        bill.setCessAmount(calc.cessTotal);
+        bill.setServiceCharge(calc.serviceCharge);
         bill.setPackagingCharge(packagingCharge);
-        bill.setRoundOff(roundOff);
-        bill.setTotalAmount(roundedTotal);
+        bill.setRoundOff(calc.roundOff);
+        bill.setTotalAmount(calc.totalAmount);
         bill.setPaidAmount(BigDecimal.ZERO);
         bill.setChangeReturned(BigDecimal.ZERO);
         bill.setBillStatus(BillStatus.DRAFT);
@@ -200,14 +244,13 @@ public class BillingService {
 
         Bill savedBill = billRepository.save(bill);
 
-        // Update order status
         order.setIsPrinted(true);
         order.setSaveAndPrintAt(LocalDateTime.now());
         order.setOrderStatus(OrderStatus.BILLED);
         orderRepository.save(order);
 
-        log.info("Bill generated: {} for order: {}",
-                savedBill.getBillNumber(), order.getOrderNumber());
+        log.info("Bill generated: {} for order: {} (discount: {}%)",
+                savedBill.getBillNumber(), order.getOrderNumber(), discountPct);
         return toBillDto(savedBill, items);
     }
 
@@ -215,29 +258,24 @@ public class BillingService {
     @Transactional(readOnly = true)
     public BillDto getBillById(Long billId) {
         Bill bill = billRepository.findById(billId)
-                .orElseThrow(() -> new ResourceNotFoundException(
-                        "Bill", "id", billId));
-        return toBillDto(bill,
-                orderItemRepository.findByOrderId(bill.getOrder().getId()));
+                .orElseThrow(() -> new ResourceNotFoundException("Bill", "id", billId));
+        return toBillDto(bill, orderItemRepository.findByOrderId(bill.getOrder().getId()));
     }
 
     @Transactional(readOnly = true)
     public BillDto getBillByOrder(Long orderId) {
         Bill bill = billRepository.findByOrderId(orderId)
-                .orElseThrow(() -> new ResourceNotFoundException(
-                        "Bill", "orderId", orderId));
+                .orElseThrow(() -> new ResourceNotFoundException("Bill", "orderId", orderId));
         return toBillDto(bill, orderItemRepository.findByOrderId(orderId));
     }
 
     @Transactional(readOnly = true)
     public List<BillDto> getTodaysBills(Long branchId) {
-        LocalDateTime startOfDay = LocalDateTime.of(
-                LocalDate.now(), LocalTime.MIDNIGHT);
+        LocalDateTime startOfDay = LocalDateTime.of(LocalDate.now(), LocalTime.MIDNIGHT);
         return billRepository.findTodaysBills(branchId, startOfDay)
                 .stream()
                 .map(bill -> toBillDto(bill,
-                        orderItemRepository.findByOrderId(
-                                bill.getOrder().getId())))
+                        orderItemRepository.findByOrderId(bill.getOrder().getId())))
                 .collect(Collectors.toList());
     }
 
@@ -245,8 +283,7 @@ public class BillingService {
     @Transactional
     public BillDto printBill(Long billId) {
         Bill bill = billRepository.findById(billId)
-                .orElseThrow(() -> new ResourceNotFoundException(
-                        "Bill", "id", billId));
+                .orElseThrow(() -> new ResourceNotFoundException("Bill", "id", billId));
         bill.setBillStatus(BillStatus.PRINTED);
         bill.setPrintedAt(LocalDateTime.now());
         log.info("Bill printed: {}", bill.getBillNumber());
@@ -255,49 +292,67 @@ public class BillingService {
     }
 
     // ─── APPLY DISCOUNT ────────────────────────────────
+    /*
+     * Recalculates entire bill with new discountPct.
+     * Called when cashier enters discount % on billing screen.
+     * Updates all amounts: discount, taxable, GST, service charge, total.
+     */
     @Transactional
     public BillDto applyDiscount(Long billId, ApplyDiscountRequest request) {
         Bill bill = billRepository.findById(billId)
-                .orElseThrow(() -> new ResourceNotFoundException(
-                        "Bill", "id", billId));
+                .orElseThrow(() -> new ResourceNotFoundException("Bill", "id", billId));
 
         if (bill.getBillStatus() == BillStatus.PAID) {
             throw new BusinessException(
-                    "Cannot apply discount to paid bill",
-                    "BILL_ALREADY_PAID");
+                    "Cannot apply discount to paid bill", "BILL_ALREADY_PAID");
         }
 
-        bill.setOrderDiscount(request.getDiscountAmount());
+        BigDecimal discountPct = request.getDiscountPct() != null
+                ? request.getDiscountPct() : BigDecimal.ZERO;
+
+        List<OrderItem> items = orderItemRepository
+                .findByOrderId(bill.getOrder().getId())
+                .stream()
+                .filter(i -> i.getItemStatus() != OrderStatus.CANCELLED)
+                .collect(Collectors.toList());
+
+        BigDecimal serviceChargePct = branchSettingsRepository
+                .findByBranchId(bill.getBranch().getId())
+                .map(s -> s.getServiceChargePct())
+                .orElse(BigDecimal.ZERO);
+
+        // Recalculate everything with new discount %
+        BillCalculation calc = calculateBill(
+                items, discountPct, serviceChargePct, bill.getPackagingCharge());
+
+        // Update all bill fields
+        bill.setDiscountPct(discountPct);
+        bill.setOrderDiscount(calc.orderDiscount);
         bill.setDiscountReason(request.getDiscountReason());
+        bill.setCgstAmount(calc.cgstTotal);
+        bill.setSgstAmount(calc.sgstTotal);
+        bill.setIgstAmount(calc.igstTotal);
+        bill.setCessAmount(calc.cessTotal);
+        bill.setServiceCharge(calc.serviceCharge);
+        bill.setRoundOff(calc.roundOff);
+        bill.setTotalAmount(calc.totalAmount);
+        bill.setLoyaltyPointsEarned(calculateLoyaltyPoints(calc.totalAmount));
 
-        BigDecimal newTotal = bill.getSubtotal()
-                .subtract(request.getDiscountAmount())
-                .add(bill.getCgstAmount()).add(bill.getSgstAmount())
-                .add(bill.getIgstAmount()).add(bill.getCessAmount())
-                .add(bill.getServiceCharge()).add(bill.getPackagingCharge());
-
-        BigDecimal roundedTotal = newTotal.setScale(0, RoundingMode.HALF_UP);
-        bill.setRoundOff(roundedTotal.subtract(newTotal));
-        bill.setTotalAmount(roundedTotal);
-
-        log.info("Discount applied to bill: {}", bill.getBillNumber());
-        return toBillDto(billRepository.save(bill),
-                orderItemRepository.findByOrderId(bill.getOrder().getId()));
+        log.info("Discount {}% applied to bill: {} — new total: {}",
+                discountPct, bill.getBillNumber(), calc.totalAmount);
+        return toBillDto(billRepository.save(bill), items);
     }
 
     // ─── SETTLE BILL ───────────────────────────────────
     @Transactional
     public BillDto settleBill(Long billId, SettleRequest request) {
         Bill bill = billRepository.findById(billId)
-                .orElseThrow(() -> new ResourceNotFoundException(
-                        "Bill", "id", billId));
+                .orElseThrow(() -> new ResourceNotFoundException("Bill", "id", billId));
 
         if (bill.getBillStatus() == BillStatus.PAID) {
-            throw new BusinessException(
-                    "Bill is already paid", "BILL_ALREADY_PAID");
+            throw new BusinessException("Bill is already paid", "BILL_ALREADY_PAID");
         }
 
-        // Validate total payment
         BigDecimal totalPaid = request.getPayments().stream()
                 .map(PaymentRequest::getAmount)
                 .reduce(BigDecimal.ZERO, BigDecimal::add);
@@ -311,7 +366,6 @@ public class BillingService {
 
         BigDecimal change = totalPaid.subtract(bill.getTotalAmount());
 
-        // Save payment records
         for (PaymentRequest pr : request.getPayments()) {
             BillPayment payment = new BillPayment();
             payment.setBill(bill);
@@ -323,8 +377,8 @@ public class BillingService {
             paymentRepository.save(payment);
         }
 
-        Integer pointsUsed = request.getLoyaltyPointsToUse() != null ?
-                request.getLoyaltyPointsToUse() : 0;
+        Integer pointsUsed = request.getLoyaltyPointsToUse() != null
+                ? request.getLoyaltyPointsToUse() : 0;
 
         bill.setPaidAmount(totalPaid);
         bill.setChangeReturned(change);
@@ -333,13 +387,11 @@ public class BillingService {
         bill.setLoyaltyPointsUsed(pointsUsed);
         Bill saved = billRepository.save(bill);
 
-        // Settle order
         CustomerOrder order = bill.getOrder();
         order.setIsSettled(true);
         order.setOrderStatus(OrderStatus.BILLED);
         orderRepository.save(order);
 
-        // Free table if no more active orders
         if (order.getTable() != null) {
             Long activeCount = (long) orderRepository
                     .findByTableIdAndIsSettledFalseAndDeletedAtIsNull(
@@ -353,35 +405,30 @@ public class BillingService {
             }
         }
 
-        // Update customer stats
         if (bill.getCustomer() != null) {
             Customer customer = bill.getCustomer();
             customer.setLoyaltyPointsBalance(
                     customer.getLoyaltyPointsBalance()
                     + bill.getLoyaltyPointsEarned() - pointsUsed);
             customer.setTotalVisits(customer.getTotalVisits() + 1);
-            customer.setTotalSpent(
-                    customer.getTotalSpent().add(bill.getTotalAmount()));
+            customer.setTotalSpent(customer.getTotalSpent().add(bill.getTotalAmount()));
             customerRepository.save(customer);
         }
 
         log.info("Bill settled: {} — Paid: {}, Change: {}",
                 bill.getBillNumber(), totalPaid, change);
-        return toBillDto(saved,
-                orderItemRepository.findByOrderId(order.getId()));
+        return toBillDto(saved, orderItemRepository.findByOrderId(order.getId()));
     }
 
     // ─── VOID BILL ─────────────────────────────────────
     @Transactional
     public BillDto voidBill(Long billId, Long userId) {
         Bill bill = billRepository.findById(billId)
-                .orElseThrow(() -> new ResourceNotFoundException(
-                        "Bill", "id", billId));
+                .orElseThrow(() -> new ResourceNotFoundException("Bill", "id", billId));
 
         if (bill.getBillStatus() == BillStatus.PAID) {
             throw new BusinessException(
-                    "Cannot void a paid bill. Use refund instead.",
-                    "BILL_ALREADY_PAID");
+                    "Cannot void a paid bill. Use refund instead.", "BILL_ALREADY_PAID");
         }
 
         bill.setBillStatus(BillStatus.VOIDED);
@@ -401,13 +448,13 @@ public class BillingService {
                 .map(i -> BillItemDto.builder()
                         .orderItemId(i.getId())
                         .itemName(i.getItemNameSnapshot())
-                        .variantName(i.getVariant() != null ?
-                                i.getVariant().getVariantName() : null)
+                        .variantName(i.getVariant() != null
+                                ? i.getVariant().getVariantName() : null)
                         .quantity(i.getQuantity())
                         .unitPrice(i.getUnitPriceSnapshot())
                         .discount(i.getDiscountAmount())
-                        .totalPrice(i.getIsComplimentary() ? BigDecimal.ZERO :
-                                i.getUnitPriceSnapshot()
+                        .totalPrice(i.getIsComplimentary() ? BigDecimal.ZERO
+                                : i.getUnitPriceSnapshot()
                                         .multiply(BigDecimal.valueOf(i.getQuantity()))
                                         .subtract(i.getDiscountAmount()))
                         .isComplimentary(i.getIsComplimentary())
@@ -432,15 +479,13 @@ public class BillingService {
                 .orderId(bill.getOrder().getId())
                 .orderNumber(bill.getOrder().getOrderNumber())
                 .branchId(bill.getBranch().getId())
-                .customerId(bill.getCustomer() != null ?
-                        bill.getCustomer().getId() : null)
-                .customerName(bill.getCustomer() != null ?
-                        bill.getCustomer().getName() : null)
-                .customerPhone(bill.getCustomer() != null ?
-                        bill.getCustomer().getPhone() : null)
+                .customerId(bill.getCustomer() != null ? bill.getCustomer().getId() : null)
+                .customerName(bill.getCustomer() != null ? bill.getCustomer().getName() : null)
+                .customerPhone(bill.getCustomer() != null ? bill.getCustomer().getPhone() : null)
                 .subtotal(bill.getSubtotal())
                 .itemDiscount(bill.getItemDiscount())
                 .orderDiscount(bill.getOrderDiscount())
+                .discountPct(bill.getDiscountPct())              // [NEW]
                 .discountReason(bill.getDiscountReason())
                 .cgstAmount(bill.getCgstAmount())
                 .sgstAmount(bill.getSgstAmount())
@@ -463,4 +508,18 @@ public class BillingService {
                 .payments(payments)
                 .build();
     }
+
+    // ─── INNER RECORD — calculation result ─────────────
+    private record BillCalculation(
+            BigDecimal subtotal,
+            BigDecimal orderDiscount,
+            BigDecimal totalTaxable,
+            BigDecimal cgstTotal,
+            BigDecimal sgstTotal,
+            BigDecimal igstTotal,
+            BigDecimal cessTotal,
+            BigDecimal serviceCharge,
+            BigDecimal roundOff,
+            BigDecimal totalAmount
+    ) {}
 }

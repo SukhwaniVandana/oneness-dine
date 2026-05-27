@@ -1,6 +1,7 @@
 package com.oneness.dine.billing.dto;
 
-import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.DecimalMax;
+import jakarta.validation.constraints.DecimalMin;
 import lombok.Getter;
 import lombok.Setter;
 
@@ -10,8 +11,10 @@ import java.math.BigDecimal;
 @Setter
 public class ApplyDiscountRequest {
 
-    @NotNull(message = "Discount amount is required")
-    private BigDecimal discountAmount;
+    // [CHANGED] — now accepts percentage, not flat amount
+    @DecimalMin(value = "0.0", message = "Discount cannot be negative")
+    @DecimalMax(value = "100.0", message = "Discount cannot exceed 100%")
+    private BigDecimal discountPct;
 
     private String discountReason;
 }

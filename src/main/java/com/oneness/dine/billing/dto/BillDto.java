@@ -23,7 +23,8 @@ public class BillDto {
     private String        customerPhone;
     private BigDecimal    subtotal;
     private BigDecimal    itemDiscount;
-    private BigDecimal    orderDiscount;
+    private BigDecimal    orderDiscount;   // total discount amount (derived from discountPct)
+    private BigDecimal    discountPct;     // [NEW] — the % applied
     private String        discountReason;
     private BigDecimal    cgstAmount;
     private BigDecimal    sgstAmount;

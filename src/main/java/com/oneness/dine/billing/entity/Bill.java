@@ -47,6 +47,10 @@ public class Bill {
     @Column(name = "order_discount")
     private BigDecimal orderDiscount = BigDecimal.ZERO;
 
+    // [NEW] — stores the discount percentage applied at settlement
+    @Column(name = "discount_pct")
+    private BigDecimal discountPct = BigDecimal.ZERO;
+
     @Column(name = "discount_reason", length = 200)
     private String discountReason;
 
