@@ -10,4 +10,5 @@ import java.util.List;
 public interface KotItemRepository
         extends JpaRepository<KotItem, Long> {
     List<KotItem> findByKotId(Long kotId);
+    List<KotItem> findByOrderItemId(Long orderItemId);
 }

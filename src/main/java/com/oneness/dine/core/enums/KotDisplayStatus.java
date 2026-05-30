@@ -4,5 +4,6 @@ public enum KotDisplayStatus {
     PENDING,
     PREPARING,
     READY,
-    SERVED
+    SERVED,
+    CANCELLED  // [NEW] — item cancelled by captain before kitchen starts
 }

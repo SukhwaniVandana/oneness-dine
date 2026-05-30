@@ -4,6 +4,7 @@ import com.oneness.dine.auth.entity.User;
 import com.oneness.dine.auth.entity.UserSession;
 import com.oneness.dine.auth.repository.UserRepository;
 import com.oneness.dine.auth.repository.UserSessionRepository;
+import com.oneness.dine.core.enums.KotDisplayStatus;
 import com.oneness.dine.core.enums.OrderStatus;
 import com.oneness.dine.core.enums.TableStatus;
 import com.oneness.dine.core.exception.BusinessException;
@@ -21,6 +22,7 @@ import com.oneness.dine.order.entity.CustomerOrder;
 import com.oneness.dine.order.entity.OrderItem;
 import com.oneness.dine.order.entity.OrderItemAddon;
 import com.oneness.dine.order.repository.CustomerOrderRepository;
+import com.oneness.dine.order.repository.KotItemRepository;
 import com.oneness.dine.order.repository.OrderItemAddonRepository;
 import com.oneness.dine.order.repository.OrderItemRepository;
 import com.oneness.dine.restaurant.entity.Branch;
@@ -46,6 +48,7 @@ public class OrderService {
 
     private final CustomerOrderRepository orderRepository;
     private final OrderItemRepository     orderItemRepository;
+    private final KotItemRepository kotItemRepository;
     private final OrderItemAddonRepository addonRepository;
     private final BranchRepository        branchRepository;
     private final RestaurantTableRepository tableRepository;
@@ -289,6 +292,13 @@ public class OrderService {
         item.setItemStatus(OrderStatus.CANCELLED);
         orderItemRepository.save(item);
 
+        // Cancel matching kot_item only if PENDING (not yet in kitchen)
+        kotItemRepository.findByOrderItemId(orderItemId).forEach(kotItem -> {
+            if (kotItem.getKitchenStatus() == KotDisplayStatus.PENDING) {
+                kotItem.setKitchenStatus(KotDisplayStatus.CANCELLED);
+                kotItemRepository.save(kotItem);
+            }
+        });
         log.info("Order item {} cancelled from order {}",
                 orderItemId, order.getOrderNumber());
 
