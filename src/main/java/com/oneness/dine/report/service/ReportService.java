@@ -127,8 +127,13 @@ public class ReportService {
         return toSummaryDto(saved);
     }
 
-    @Transactional(readOnly = true)
+    @Transactional
     public DailySummaryDto getDailySummary(Long branchId, LocalDate date) {
+        // Always regenerate for today — data changes throughout the day
+        // For past dates — return existing record if available (immutable)
+        if (date.equals(LocalDate.now())) {
+            return generateDailySummary(branchId, date); // always fresh for today
+        }
         return summaryRepository.findByBranchIdAndSummaryDate(branchId, date)
                 .map(this::toSummaryDto)
                 .orElseGet(() -> generateDailySummary(branchId, date));
