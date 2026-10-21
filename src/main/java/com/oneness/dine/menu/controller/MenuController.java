@@ -45,6 +45,15 @@ public class MenuController {
                 ApiResponse.success(null, "Tax group deleted successfully"));
     }
 
+    @PatchMapping("/tax-groups/{id}/default")
+    public ResponseEntity<ApiResponse<TaxGroupDto>> setDefault(
+            @PathVariable Long id,
+            @RequestParam Long branchId) {
+        return ResponseEntity.ok(
+                ApiResponse.success(menuService.setDefaultTaxGroup(id, branchId))
+        );
+    }
+
     // ─── CATEGORIES ──────────────────────────────────
 
     @GetMapping("/categories")

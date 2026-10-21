@@ -82,6 +82,26 @@ public class MenuService {
         log.info("Tax group soft deleted: {}", id);
     }
 
+    @Transactional
+    public TaxGroupDto setDefaultTaxGroup(Long taxGroupId, Long branchId) {
+        // Clear existing default for this branch
+        taxGroupRepository.findByBranchIdAndIsDefaultTrue(branchId)
+                .ifPresent(tg -> {
+                    tg.setIsDefault(false);
+                    taxGroupRepository.save(tg);
+                });
+
+        // Set new default
+        TaxGroup taxGroup = taxGroupRepository.findById(taxGroupId)
+                .orElseThrow(() -> new ResourceNotFoundException("TaxGroup", "id", taxGroupId));
+
+        taxGroup.setIsDefault(true);
+        taxGroupRepository.save(taxGroup);
+
+        log.info("Default tax group set to: {} for branch: {}", taxGroup.getName(), branchId);
+        return toTaxGroupDto(taxGroup);
+    }
+
     // ─── CATEGORY ────────────────────────────────────
 
     @Transactional(readOnly = true)
@@ -212,6 +232,11 @@ public class MenuService {
         if (request.getTaxGroupId() != null) {
             TaxGroup taxGroup = taxGroupRepository
                     .findById(request.getTaxGroupId())
+                    .orElseThrow(() -> new ResourceNotFoundException(
+                            "TaxGroup", "id", request.getTaxGroupId()));
+            item.setTaxGroup(taxGroup);
+        } else {
+            TaxGroup taxGroup = taxGroupRepository.findByBranchIdAndIsDefaultTrue(request.getBranchId())
                     .orElseThrow(() -> new ResourceNotFoundException(
                             "TaxGroup", "id", request.getTaxGroupId()));
             item.setTaxGroup(taxGroup);
@@ -390,6 +415,7 @@ public class MenuService {
                 .cessPct(tg.getCessPct())
                 .isInclusive(tg.getIsInclusive())
                 .isActive(tg.getIsActive())
+                .isDefault(tg.getIsDefault())
                 .build();
     }
 

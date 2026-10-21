@@ -38,4 +38,7 @@ public class TaxGroup extends BaseEntity {
 
     @Column(name = "is_active")
     private Boolean isActive = true;
+
+    @Column(name = "is_default")
+    private Boolean isDefault = true;
 }

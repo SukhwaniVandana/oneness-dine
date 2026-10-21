@@ -19,4 +19,5 @@ public class TaxGroupDto {
     private BigDecimal cessPct;
     private Boolean    isInclusive;
     private Boolean    isActive;
+    private Boolean    isDefault;
 }
