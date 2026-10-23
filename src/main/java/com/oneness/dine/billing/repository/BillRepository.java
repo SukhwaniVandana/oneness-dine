@@ -16,6 +16,7 @@ public interface BillRepository extends JpaRepository<Bill, Long> {
 
     Optional<Bill> findByOrderId(Long orderId);
     Optional<Bill> findByBillNumber(String billNumber);
+    Optional<Bill> findByOrderIdAndDeletedAtIsNull(Long orderId);
     boolean existsByBillNumber(String billNumber);
 
     @Query("SELECT b FROM Bill b WHERE b.branch.id = :branchId " +

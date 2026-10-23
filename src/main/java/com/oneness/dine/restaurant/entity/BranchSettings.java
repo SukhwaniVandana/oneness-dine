@@ -1,6 +1,8 @@
 package com.oneness.dine.restaurant.entity;
 
+import com.oneness.dine.core.enums.GstCalcMode;
 import com.oneness.dine.core.enums.KotPrintMode;
+import com.oneness.dine.menu.entity.TaxGroup;
 import jakarta.persistence.*;
 import lombok.Getter;
 import lombok.Setter;
@@ -61,4 +63,12 @@ public class BranchSettings {
 
     @Column(name = "kitchen_display_enabled")
     private Boolean kitchenDisplayEnabled = false;
+
+    @Column(name = "gst_calc_mode", length = 10)
+    @Enumerated(EnumType.STRING)
+    private GstCalcMode gstCalcMode = GstCalcMode.BILL_WISE;
+
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "default_tax_group_id")
+    private TaxGroup defaultTaxGroup;
 }

@@ -7,14 +7,12 @@ import com.oneness.dine.billing.entity.BillPayment;
 import com.oneness.dine.billing.repository.BillPaymentRepository;
 import com.oneness.dine.billing.repository.BillRepository;
 import com.oneness.dine.billing.repository.BillSplitRepository;
-import com.oneness.dine.core.enums.BillStatus;
-import com.oneness.dine.core.enums.OrderStatus;
-import com.oneness.dine.core.enums.PaymentStatus;
-import com.oneness.dine.core.enums.TableStatus;
+import com.oneness.dine.core.enums.*;
 import com.oneness.dine.core.exception.BusinessException;
 import com.oneness.dine.core.exception.ResourceNotFoundException;
 import com.oneness.dine.customer.entity.Customer;
 import com.oneness.dine.customer.repository.CustomerRepository;
+import com.oneness.dine.menu.entity.TaxGroup;
 import com.oneness.dine.order.entity.CustomerOrder;
 import com.oneness.dine.order.entity.OrderItem;
 import com.oneness.dine.order.repository.CustomerOrderRepository;
@@ -23,6 +21,7 @@ import com.oneness.dine.restaurant.repository.BranchSettingsRepository;
 import com.oneness.dine.table.repository.RestaurantTableRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.hibernate.query.Order;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -89,7 +88,9 @@ public class BillingService {
             List<OrderItem> items,
             BigDecimal discountPct,
             BigDecimal serviceChargePct,
-            BigDecimal packagingCharge) {
+            BigDecimal packagingCharge,
+            GstCalcMode calcMode,
+            TaxGroup defaultTaxGroup) {
 
         BigDecimal subtotal      = BigDecimal.ZERO;
         BigDecimal orderDiscount = BigDecimal.ZERO;
@@ -119,25 +120,32 @@ public class BillingService {
 
             // GST on taxable amount (CGST+SGST for intra-state OR IGST for inter-state)
             // cess always applies if set
-            if (item.getItem().getTaxGroup() != null) {
-                var tg = item.getItem().getTaxGroup();
+            // Determine which tax group to use
+            var tg = (calcMode == GstCalcMode.ITEM_WISE)
+                    ? item.getItem().getTaxGroup()
+                    : null; // bill-wise: skip per-item GST, handled below
 
-                cgstTotal = cgstTotal.add(itemTaxable
-                        .multiply(tg.getCgstPct())
+            if (tg != null) {
+                cgstTotal = cgstTotal.add(itemTaxable.multiply(tg.getCgstPct())
                         .divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP));
-
-                sgstTotal = sgstTotal.add(itemTaxable
-                        .multiply(tg.getSgstPct())
+                sgstTotal = sgstTotal.add(itemTaxable.multiply(tg.getSgstPct())
                         .divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP));
-
-                igstTotal = igstTotal.add(itemTaxable
-                        .multiply(tg.getIgstPct())
+                igstTotal = igstTotal.add(itemTaxable.multiply(tg.getIgstPct())
                         .divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP));
-
-                cessTotal = cessTotal.add(itemTaxable
-                        .multiply(tg.getCessPct())
+                cessTotal = cessTotal.add(itemTaxable.multiply(tg.getCessPct())
                         .divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP));
             }
+        }
+        // Bill-wise GST — apply default tax group on total taxable amount
+        if (calcMode == GstCalcMode.BILL_WISE && defaultTaxGroup != null) {
+            cgstTotal = totalTaxable.multiply(defaultTaxGroup.getCgstPct())
+                    .divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP);
+            sgstTotal = totalTaxable.multiply(defaultTaxGroup.getSgstPct())
+                    .divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP);
+            igstTotal = totalTaxable.multiply(defaultTaxGroup.getIgstPct())
+                    .divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP);
+            cessTotal = totalTaxable.multiply(defaultTaxGroup.getCessPct())
+                    .divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP);
         }
 
         // Service charge on total taxable amount
@@ -166,10 +174,8 @@ public class BillingService {
     @Transactional
     public BillDto generateBill(BillRequest request) {
 
-        if (billRepository.findByOrderId(request.getOrderId()).isPresent()) {
-            throw new BusinessException(
-                    "Bill already generated for this order",
-                    "BILL_ALREADY_EXISTS");
+        if (billRepository.findByOrderIdAndDeletedAtIsNull(request.getOrderId()).isPresent()) {
+            throw new BusinessException("Bill already generated for this order", "BILL_ALREADY_EXISTS");
         }
 
         CustomerOrder order = orderRepository.findById(request.getOrderId())
@@ -193,16 +199,16 @@ public class BillingService {
         // Initial generation always uses discountPct = 0
         BigDecimal discountPct = BigDecimal.ZERO;
 
-        BigDecimal serviceChargePct = branchSettingsRepository
-                .findByBranchId(order.getBranch().getId())
-                .map(s -> s.getServiceChargePct())
-                .orElse(BigDecimal.ZERO);
+        var settings = branchSettingsRepository.findByBranchId(order.getBranch().getId());
+        BigDecimal serviceChargePct = settings.map(s -> s.getServiceChargePct()).orElse(BigDecimal.ZERO);
 
         BigDecimal packagingCharge = request.getPackagingCharge() != null
                 ? request.getPackagingCharge() : BigDecimal.ZERO;
 
-        BillCalculation calc = calculateBill(
-                items, discountPct, serviceChargePct, packagingCharge);
+        GstCalcMode calcMode = settings.map(s -> s.getGstCalcMode()).orElse(GstCalcMode.BILL_WISE);
+        TaxGroup defaultTaxGroup = settings.map(s -> s.getDefaultTaxGroup()).orElse(null);
+
+        BillCalculation calc = calculateBill(items, discountPct, serviceChargePct, packagingCharge, calcMode, defaultTaxGroup);
 
         Integer pointsEarned = calculateLoyaltyPoints(calc.totalAmount);
 
@@ -264,7 +270,7 @@ public class BillingService {
 
     @Transactional(readOnly = true)
     public BillDto getBillByOrder(Long orderId) {
-        Bill bill = billRepository.findByOrderId(orderId)
+        Bill bill = billRepository.findByOrderIdAndDeletedAtIsNull(orderId)
                 .orElseThrow(() -> new ResourceNotFoundException("Bill", "orderId", orderId));
         return toBillDto(bill, orderItemRepository.findByOrderId(orderId));
     }
@@ -316,14 +322,14 @@ public class BillingService {
                 .filter(i -> i.getItemStatus() != OrderStatus.CANCELLED)
                 .collect(Collectors.toList());
 
-        BigDecimal serviceChargePct = branchSettingsRepository
-                .findByBranchId(bill.getBranch().getId())
-                .map(s -> s.getServiceChargePct())
-                .orElse(BigDecimal.ZERO);
-
         // Recalculate everything with new discount %
-        BillCalculation calc = calculateBill(
-                items, discountPct, serviceChargePct, bill.getPackagingCharge());
+        var settings = branchSettingsRepository.findByBranchId(bill.getBranch().getId());
+        BigDecimal serviceChargePct = settings.map(s -> s.getServiceChargePct()).orElse(BigDecimal.ZERO);
+        GstCalcMode calcMode = settings.map(s -> s.getGstCalcMode()).orElse(GstCalcMode.BILL_WISE);
+        TaxGroup defaultTaxGroup = settings.map(s -> s.getDefaultTaxGroup()).orElse(null);
+        BigDecimal packagingCharge = bill.getPackagingCharge() != null ? bill.getPackagingCharge() : BigDecimal.ZERO;
+
+        BillCalculation calc = calculateBill(items, discountPct, serviceChargePct, packagingCharge, calcMode, defaultTaxGroup);
 
         // Update all bill fields
         bill.setDiscountPct(discountPct);
@@ -436,6 +442,10 @@ public class BillingService {
         if (userId != null) {
             userRepository.findById(userId).ifPresent(bill::setDeletedByUser);
         }
+        // Reset order so it can be re-billed
+        CustomerOrder order = bill.getOrder();
+        order.setOrderStatus(OrderStatus.IN_PROGRESS);
+        orderRepository.save(order);
 
         log.info("Bill voided: {}", bill.getBillNumber());
         return toBillDto(billRepository.save(bill),
@@ -445,6 +455,7 @@ public class BillingService {
     // ─── MAPPER ────────────────────────────────────────
     private BillDto toBillDto(Bill bill, List<OrderItem> orderItems) {
         List<BillItemDto> items = orderItems.stream()
+                .filter(i -> i.getItemStatus() != OrderStatus.CANCELLED)
                 .map(i -> BillItemDto.builder()
                         .orderItemId(i.getId())
                         .itemName(i.getItemNameSnapshot())
