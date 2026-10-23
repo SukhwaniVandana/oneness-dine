@@ -250,8 +250,6 @@ public class BillingService {
 
         Bill savedBill = billRepository.save(bill);
 
-        order.setIsPrinted(true);
-        order.setSaveAndPrintAt(LocalDateTime.now());
         order.setOrderStatus(OrderStatus.BILLED);
         orderRepository.save(order);
 
@@ -293,6 +291,10 @@ public class BillingService {
         bill.setBillStatus(BillStatus.PRINTED);
         bill.setPrintedAt(LocalDateTime.now());
         log.info("Bill printed: {}", bill.getBillNumber());
+        CustomerOrder order = bill.getOrder();
+        order.setIsPrinted(true);
+        order.setSaveAndPrintAt(LocalDateTime.now());
+        orderRepository.save(order);
         return toBillDto(billRepository.save(bill),
                 orderItemRepository.findByOrderId(bill.getOrder().getId()));
     }
