@@ -1,6 +1,7 @@
 package com.oneness.dine.billing.dto;
 
 import com.oneness.dine.core.enums.BillStatus;
+import com.oneness.dine.restaurant.entity.Branch;
 import lombok.Builder;
 import lombok.Getter;
 import lombok.Setter;
@@ -18,6 +19,9 @@ public class BillDto {
     private Long          orderId;
     private String        orderNumber;
     private Long          branchId;
+    private String        branchName;
+    private String        branchAddress;
+    private String        branchGstin;
     private Long          customerId;
     private String        customerName;
     private String        customerPhone;
