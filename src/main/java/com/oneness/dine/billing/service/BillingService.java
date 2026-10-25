@@ -30,7 +30,9 @@ import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
+import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 
 @Slf4j
@@ -280,6 +282,31 @@ public class BillingService {
                 .stream()
                 .map(bill -> toBillDto(bill,
                         orderItemRepository.findByOrderId(bill.getOrder().getId())))
+                .collect(Collectors.toList());
+    }
+
+    @Transactional(readOnly = true)
+    public List<BillDto> getBillsByDateRange(Long branchId, LocalDate from, LocalDate to) {
+        LocalDateTime startOfDay = LocalDateTime.of(from, LocalTime.MIDNIGHT);
+        LocalDateTime endOfDay   = LocalDateTime.of(to, LocalTime.MAX);
+
+        List<Bill> bills = billRepository
+                .findByBranchIdAndCreatedAtBetween(branchId, startOfDay, endOfDay);
+
+        // Fetch all order items in one query instead of N queries
+        List<Long> orderIds = bills.stream()
+                .map(b -> b.getOrder().getId())
+                .collect(Collectors.toList());
+
+        Map<Long, List<OrderItem>> itemsByOrderId = orderIds.isEmpty()
+                ? Collections.emptyMap()
+                : orderItemRepository.findByOrderIdIn(orderIds)
+                  .stream()
+                  .collect(Collectors.groupingBy(i -> i.getOrder().getId()));
+
+        return bills.stream()
+                .map(bill -> toBillDto(bill,
+                        itemsByOrderId.getOrDefault(bill.getOrder().getId(), List.of())))
                 .collect(Collectors.toList());
     }
 

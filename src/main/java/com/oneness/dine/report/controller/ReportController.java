@@ -76,12 +76,11 @@ public class ReportController {
     @GetMapping("/payments")
     public ResponseEntity<ApiResponse<PaymentReportDto>> getPaymentReport(
             @RequestParam Long branchId,
-            @RequestParam(required = false)
-            @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate date) {
-        if (date == null) date = LocalDate.now();
+            @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate from,
+            @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate to) {
         return ResponseEntity.ok(
                 ApiResponse.success(
-                        reportService.getPaymentReport(branchId, date)));
+                        reportService.getPaymentReport(branchId, from, to)));
     }
 
     // ─── CANCELLED ORDERS ────────────────────────────

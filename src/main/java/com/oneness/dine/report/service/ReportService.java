@@ -21,6 +21,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
@@ -46,20 +47,19 @@ public class ReportService {
 
     // ─── DAILY SUMMARY ───────────────────────────────
 
-    @Transactional
-    public DailySummaryDto generateDailySummary(Long branchId,
-                                                 LocalDate date) {
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public DailySummaryDto generateDailySummary(Long branchId, LocalDate date) {
         LocalDateTime startOfDay = LocalDateTime.of(date, LocalTime.MIDNIGHT);
         LocalDateTime endOfDay   = LocalDateTime.of(date, LocalTime.MAX);
 
         // Performance: fetch bills once and compute everything in memory
-        List<Bill> bills = billRepository.findTodaysBills(branchId, startOfDay)
+        List<Bill> bills = billRepository.findByBranchIdAndCreatedAtBetween(branchId, startOfDay, endOfDay)
                 .stream()
                 .filter(b -> b.getBillStatus() == BillStatus.PAID)
                 .collect(Collectors.toList());
 
         List<CustomerOrder> orders = orderRepository
-                .findTodaysOrders(branchId, startOfDay);
+                .findByBranchIdAndCreatedAtBetween(branchId, startOfDay, endOfDay);
 
         // Calculate totals
         BigDecimal totalRevenue  = bills.stream()
@@ -141,9 +141,20 @@ public class ReportService {
 
     // ─── SALES REPORT ────────────────────────────────
 
-    @Transactional(readOnly = true)
+    @Transactional
     public SalesReportDto getSalesReport(Long branchId,
                                           LocalDate from, LocalDate to) {
+        // Backfill any missing daily summaries in the range
+        LocalDate cursor = from;
+        while (!cursor.isAfter(to)) {
+            final LocalDate d = cursor;
+            boolean exists = summaryRepository
+                    .findByBranchIdAndSummaryDate(branchId, d).isPresent();
+            if (!exists || d.equals(LocalDate.now())) {
+                generateDailySummary(branchId, d);
+            }
+            cursor = cursor.plusDays(1);
+        }
         List<DailySummary> dailies = summaryRepository
                 .findByBranchIdAndDateRange(branchId, from, to);
 
@@ -194,7 +205,7 @@ public class ReportService {
 
         // Performance: single query joining orders and items
         List<CustomerOrder> orders = orderRepository
-                .findTodaysOrders(branchId, start);
+                .findByBranchIdAndCreatedAtBetween(branchId, start, end);
 
         // Group order items by item and aggregate
         Map<Long, List<OrderItem>> itemGroups = orders.stream()
@@ -234,11 +245,12 @@ public class ReportService {
     // ─── PAYMENT REPORT ──────────────────────────────
 
     @Transactional(readOnly = true)
-    public PaymentReportDto getPaymentReport(Long branchId, LocalDate date) {
-        LocalDateTime startOfDay = LocalDateTime.of(date, LocalTime.MIDNIGHT);
+    public PaymentReportDto getPaymentReport(Long branchId, LocalDate from, LocalDate to) {
+        LocalDateTime startOfDay = LocalDateTime.of(from, LocalTime.MIDNIGHT);
+        LocalDateTime endOfDay   = LocalDateTime.of(to, LocalTime.MAX);
 
         List<Bill> bills = billRepository
-                .findTodaysBills(branchId, startOfDay)
+                .findByBranchIdAndCreatedAtBetween(branchId, startOfDay, endOfDay)
                 .stream()
                 .filter(b -> b.getBillStatus() == BillStatus.PAID)
                 .collect(Collectors.toList());
@@ -260,7 +272,8 @@ public class ReportService {
 
         return PaymentReportDto.builder()
                 .branchId(branchId)
-                .date(date)
+                .fromDate(from)
+                .toDate(to)
                 .cashTotal(cash)
                 .cardTotal(card)
                 .upiTotal(upi)

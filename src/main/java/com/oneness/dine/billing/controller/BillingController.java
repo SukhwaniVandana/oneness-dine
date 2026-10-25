@@ -5,10 +5,12 @@ import com.oneness.dine.billing.service.BillingService;
 import com.oneness.dine.core.dto.ApiResponse;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.time.LocalDate;
 import java.util.List;
 import java.util.Map;
 
@@ -38,10 +40,16 @@ public class BillingController {
     @GetMapping
     public ResponseEntity<ApiResponse<?>> getBills(
             @RequestParam(required = false) Long orderId,
-            @RequestParam(required = false) Long branchId) {
+            @RequestParam(required = false) Long branchId,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate from,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate to){
         if (orderId != null) {
             return ResponseEntity.ok(ApiResponse.success(
                     billingService.getBillByOrder(orderId)));
+        }
+        if (branchId != null && from != null && to != null) {
+            return ResponseEntity.ok(ApiResponse.success(
+                    billingService.getBillsByDateRange(branchId, from, to)));
         }
         if (branchId != null) {
             return ResponseEntity.ok(ApiResponse.success(

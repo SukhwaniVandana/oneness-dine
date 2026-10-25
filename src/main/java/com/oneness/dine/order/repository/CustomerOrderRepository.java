@@ -47,4 +47,6 @@ public interface CustomerOrderRepository
 
     // Check if order number exists
     boolean existsByOrderNumber(String orderNumber);
+
+    List<CustomerOrder> findByBranchIdAndCreatedAtBetween(Long branchId, LocalDateTime start, LocalDateTime end);
 }

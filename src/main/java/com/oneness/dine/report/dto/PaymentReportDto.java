@@ -12,7 +12,8 @@ import java.time.LocalDate;
 @Builder
 public class PaymentReportDto {
     private Long       branchId;
-    private LocalDate  date;
+    private LocalDate  fromDate;
+    private LocalDate  toDate;
     private BigDecimal cashTotal;
     private BigDecimal cardTotal;
     private BigDecimal upiTotal;

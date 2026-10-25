@@ -8,6 +8,7 @@ import org.springframework.stereotype.Repository;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
 
@@ -30,4 +31,6 @@ public interface BillRepository extends JpaRepository<Bill, Long> {
            "AND b.createdAt >= :startOfDay")
     BigDecimal getTotalRevenueToday(@Param("branchId") Long branchId,
                                     @Param("startOfDay") LocalDateTime startOfDay);
+
+    List<Bill> findByBranchIdAndCreatedAtBetween(Long branchId, LocalDateTime startOfDay, LocalDateTime endOfDay);
 }
