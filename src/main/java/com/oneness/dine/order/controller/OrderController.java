@@ -104,4 +104,12 @@ public class OrderController {
                         orderService.updateOrderStatus(id, request),
                         "Order cancelled successfully"));
     }
+
+    @PatchMapping("/{id}/pax")
+    public ResponseEntity<ApiResponse<OrderDto>> updatePax(
+            @PathVariable Long id,
+            @RequestParam Integer paxCount) {
+        return ResponseEntity.ok(ApiResponse.success(
+                orderService.updatePaxCount(id, paxCount)));
+    }
 }

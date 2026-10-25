@@ -396,6 +396,16 @@ public class OrderService {
         return saved;
     }
 
+    @Transactional
+    public OrderDto updatePaxCount(Long orderId, Integer paxCount) {
+        CustomerOrder order = orderRepository.findById(orderId)
+                .orElseThrow(() -> new ResourceNotFoundException("Order", "id", orderId));
+        order.setPaxCount(paxCount);
+        CustomerOrder saved = orderRepository.save(order);
+        List<OrderItem> items = orderItemRepository.findByOrderId(orderId);
+        return toOrderDto(saved, items);
+    }
+
     // ─── MAPPERS ─────────────────────────────────────
 
     public OrderDto toOrderDto(CustomerOrder order,
