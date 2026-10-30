@@ -425,6 +425,11 @@ public class BillingService {
         CustomerOrder order = bill.getOrder();
         order.setIsSettled(true);
         order.setOrderStatus(OrderStatus.BILLED);
+        // Set cashier
+        if (request.getCashierUserId() != null) {
+            userRepository.findById(request.getCashierUserId())
+                    .ifPresent(order::setCashierUser);
+        }
         orderRepository.save(order);
 
         if (order.getTable() != null) {
