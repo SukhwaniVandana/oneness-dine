@@ -37,13 +37,14 @@ import lombok.extern.slf4j.Slf4j;
 @RequiredArgsConstructor
 public class KotService {
 
-    private final KotRepository           kotRepository;
-    private final KotItemRepository       kotItemRepository;
-    private final CustomerOrderRepository orderRepository;
-    private final OrderItemRepository     orderItemRepository;
+    private final KotRepository            kotRepository;
+    private final KotItemRepository        kotItemRepository;
+    private final CustomerOrderRepository  orderRepository;
+    private final OrderItemRepository      orderItemRepository;
     private final KitchenStationRepository stationRepository;
-    private final UserSessionRepository   sessionRepository;
-    private final BranchRepository        branchRepository;
+    private final UserSessionRepository    sessionRepository;
+    private final BranchRepository         branchRepository;
+    private final KotWebSocketService      kotWebSocketService;   // ← NEW
 
     // ─── GENERATE KOT NUMBER ─────────────────────────
 
@@ -125,18 +126,28 @@ public class KotService {
             kotItem.setKitchenStatus(KotDisplayStatus.PENDING);
             kotItemRepository.save(kotItem);
 
-            // Update kot_quantity on order item    
+            // Update kot_quantity on order item
             orderItem.setKotQuantity(orderItem.getKotQuantity() + itemReq.getQuantity());
             orderItem.setItemStatus(OrderStatus.KOT_SENT);
             orderItemRepository.save(orderItem);
         }
+
         // Update order status
         order.setOrderStatus(OrderStatus.KOT_SENT);
         orderRepository.save(order);
 
         log.info("KOT created: {} for order: {}",
                 savedKot.getKotNumber(), order.getOrderNumber());
-        return toKotDto(savedKot);
+
+        KotDto kotDto = toKotDto(savedKot);
+        Long branchId = order.getBranch().getId();
+
+        // ── Broadcast new KOT to kitchen screen ──
+        kotWebSocketService.broadcastKotUpdate(branchId, kotDto);
+        // ── Broadcast table refresh to captain/tables ──
+        kotWebSocketService.broadcastTableUpdate(branchId);
+
+        return kotDto;
     }
 
     // ─── GET KOTs ────────────────────────────────────
@@ -148,10 +159,9 @@ public class KotService {
                         branchId,
                         List.of(KotDisplayStatus.PENDING,
                                 KotDisplayStatus.PREPARING,
-                                KotDisplayStatus.READY,    // [NEW]
-                                KotDisplayStatus.SERVED))  // [NEW] unsettled orders only
+                                KotDisplayStatus.READY,
+                                KotDisplayStatus.SERVED))
                         .stream()
-                        /* Filter out SERVED KOTs where order is already settled */
                         .filter(kot -> !kot.getOrder().getIsSettled())
                         .map(this::toKotDto)
                         .collect(Collectors.toList());
@@ -176,11 +186,9 @@ public class KotService {
         KotDisplayStatus newStatus = request.getDisplayStatus();
         kot.setDisplayStatus(newStatus);
 
-        // Fetch all KOT items for this KOT
-        List<KotItem> kotItems = kotItemRepository.findByKotId(kotId); // [NEW]
+        List<KotItem> kotItems = kotItemRepository.findByKotId(kotId);
 
         if (newStatus == KotDisplayStatus.PREPARING) {
-            // [NEW] Cascade PREPARING to all kot_items and order_items
             for (KotItem kotItem : kotItems) {
                 kotItem.setKitchenStatus(KotDisplayStatus.PREPARING);
                 kotItemRepository.save(kotItem);
@@ -194,7 +202,6 @@ public class KotService {
         }
 
         if (newStatus == KotDisplayStatus.READY) {
-            // [NEW] Cascade READY to all kot_items and order_items
             for (KotItem kotItem : kotItems) {
                 kotItem.setKitchenStatus(KotDisplayStatus.READY);
                 kotItemRepository.save(kotItem);
@@ -204,7 +211,6 @@ public class KotService {
                 orderItemRepository.save(orderItem);
             }
 
-            // Update order status to READY (existing behaviour ✅)
             CustomerOrder order = kot.getOrder();
             order.setOrderStatus(OrderStatus.READY);
             orderRepository.save(order);
@@ -213,7 +219,6 @@ public class KotService {
         }
 
         if (newStatus == KotDisplayStatus.SERVED) {
-            // [NEW] Cascade SERVED to all kot_items and order_items
             for (KotItem kotItem : kotItems) {
                 kotItem.setKitchenStatus(KotDisplayStatus.SERVED);
                 kotItemRepository.save(kotItem);
@@ -222,7 +227,7 @@ public class KotService {
                 orderItem.setItemStatus(OrderStatus.SERVED);
                 orderItemRepository.save(orderItem);
             }
-            // [NEW] Also update customer_order.orderStatus = SERVED
+
             CustomerOrder order = kot.getOrder();
             order.setOrderStatus(OrderStatus.SERVED);
             orderRepository.save(order);
@@ -230,7 +235,14 @@ public class KotService {
                     kot.getKotNumber(), order.getOrderNumber(), kotItems.size());
         }
 
-        return toKotDto(kotRepository.save(kot));
+        KotDto kotDto = toKotDto(kotRepository.save(kot));
+        Long branchId = kot.getBranch().getId();
+
+        // ── Broadcast status change to kitchen + captain ──
+        kotWebSocketService.broadcastKotUpdate(branchId, kotDto);
+        kotWebSocketService.broadcastTableUpdate(branchId);
+
+        return kotDto;
     }
 
     // ─── UPDATE KOT ITEM STATUS ──────────────────────
@@ -244,19 +256,25 @@ public class KotService {
                         "KotItem", "id", kotItemId));
         kotItem.setKitchenStatus(status);
 
-        // [NEW] Also cascade to order_item.itemStatus
         OrderItem orderItem = kotItem.getOrderItem();
         switch (status) {
             case PREPARING -> orderItem.setItemStatus(OrderStatus.IN_PROGRESS);
             case READY     -> orderItem.setItemStatus(OrderStatus.READY);
             case SERVED    -> orderItem.setItemStatus(OrderStatus.SERVED);
-            default        -> { /* PENDING — no change to order item */ }
+            default        -> { /* PENDING — no change */ }
         }
         orderItemRepository.save(orderItem);
 
         KotItem saved = kotItemRepository.save(kotItem);
         log.info("KOT item {} status updated to: {} — order item {} updated",
                 kotItemId, status, orderItem.getId());
+
+        // ── Broadcast item-level change ──
+        Kot kot = kotItem.getKot();
+        Long branchId = kot.getBranch().getId();
+        kotWebSocketService.broadcastKotUpdate(branchId, toKotDto(kot));
+        kotWebSocketService.broadcastTableUpdate(branchId);
+
         return toKotItemDto(saved);
     }
 
@@ -295,7 +313,8 @@ public class KotService {
                 .action(item.getAction())
                 .kitchenStatus(item.getKitchenStatus())
                 .specialInstruction(item.getSpecialInstruction())
-                .categoryName(item.getOrderItem().getItem() != null ? item.getOrderItem().getItem().getCategory().getName() : null)
+                .categoryName(item.getOrderItem().getItem() != null ?
+                        item.getOrderItem().getItem().getCategory().getName() : null)
                 .build();
     }
 }
