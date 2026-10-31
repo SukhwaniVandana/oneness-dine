@@ -65,7 +65,7 @@ public class JwtAuthFilter extends OncePerRequestFilter {
 
                 // ✅ Check 2 — Session still active in DB (not logged out)
                 boolean sessionActive = userSessionRepository
-                        .findByTokenHashAndIsActiveTrue(jwt)
+                        .findByTokenHashAndIsActiveTrue(jwtService.hashToken(jwt))
                         .isPresent();
 
                 // [NEW] Added debug log to trace result

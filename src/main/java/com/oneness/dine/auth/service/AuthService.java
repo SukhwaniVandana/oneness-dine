@@ -68,7 +68,7 @@ public class AuthService {
         session.setDeviceType(request.getDeviceType());
         session.setDeviceInfo(request.getDeviceInfo());
         session.setScreenNumber(request.getScreenNumber());
-        session.setTokenHash(token);
+        session.setTokenHash(jwtService.hashToken(token));
         session.setLoginAt(LocalDateTime.now());
         session.setIsActive(true);
         userSessionRepository.save(session);
