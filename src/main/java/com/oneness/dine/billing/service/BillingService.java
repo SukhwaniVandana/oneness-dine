@@ -399,6 +399,38 @@ public class BillingService {
                     "INSUFFICIENT_PAYMENT");
         }
 
+        // ─── Link customer from payment request ──────────────
+        // If a mobile number was sent, look up the customer (or auto-create).
+        // This overwrites any customer already linked at bill-generation time.
+        String mobile = request.getCustomerMobile();
+        if (mobile != null && !mobile.isBlank()) {
+            String name = (request.getCustomerName() != null && !request.getCustomerName().isBlank())
+                    ? request.getCustomerName() : "Guest";
+
+            Customer customer = customerRepository.findByPhone(mobile)
+                    .orElseGet(() -> {
+                        Customer c = new Customer();
+                        c.setBranch(bill.getBranch());
+                        c.setName(name);
+                        c.setPhone(mobile);
+                        c.setIsActive(true);
+                        c.setTotalVisits(0);
+                        c.setTotalSpent(BigDecimal.ZERO);
+                        c.setLoyaltyPointsBalance(0);
+                        log.info("Auto-creating customer: {} ({})", name, mobile);
+                        return customerRepository.save(c);
+                    });
+
+            // Update name if the existing record has no name or a default one
+            if ("Guest".equals(customer.getName()) && !"Guest".equals(name)) {
+                customer.setName(name);
+                customer = customerRepository.save(customer);
+            }
+
+            bill.setCustomer(customer);
+            bill.getOrder().setCustomer(customer);
+        }
+
         BigDecimal change = totalPaid.subtract(bill.getTotalAmount());
 
         for (PaymentRequest pr : request.getPayments()) {

@@ -16,4 +16,6 @@ public class SettleRequest {
     private Long    createdByUserId;
     private Integer loyaltyPointsToUse = 0;
     private Long    cashierUserId;
+    private String customerName;
+    private String customerMobile;
 }
