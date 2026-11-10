@@ -5,5 +5,7 @@ public enum BillStatus {
     PRINTED,
     PAID,
     VOIDED,
-    REFUNDED
+    REFUNDED,
+    CREDIT_DUE,
+    PARTIAL_CREDIT
 }

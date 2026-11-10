@@ -12,6 +12,7 @@ import com.oneness.dine.core.exception.BusinessException;
 import com.oneness.dine.core.exception.ResourceNotFoundException;
 import com.oneness.dine.customer.entity.Customer;
 import com.oneness.dine.customer.repository.CustomerRepository;
+import com.oneness.dine.customer.service.CreditLedgerService;
 import com.oneness.dine.menu.entity.TaxGroup;
 import com.oneness.dine.order.entity.CustomerOrder;
 import com.oneness.dine.order.entity.OrderItem;
@@ -49,6 +50,7 @@ public class BillingService {
     private final CustomerRepository        customerRepository;
     private final UserRepository            userRepository;
     private final RestaurantTableRepository tableRepository;
+    private final CreditLedgerService       creditLedgerService;
 
     // ─── GENERATE BILL NUMBER ──────────────────────────
     private String generateBillNumber(Long branchId) {
@@ -447,11 +449,27 @@ public class BillingService {
         Integer pointsUsed = request.getLoyaltyPointsToUse() != null
                 ? request.getLoyaltyPointsToUse() : 0;
 
+        // ── Determine credit amount in this settlement ─────────────────────
+        BigDecimal creditAmount = request.getPayments().stream()
+                .filter(p -> PaymentMethod.CREDIT.equals(p.getPaymentMethod()))
+                .map(PaymentRequest::getAmount)
+                .reduce(BigDecimal.ZERO, BigDecimal::add);
+        boolean hasCredit = creditAmount.compareTo(BigDecimal.ZERO) > 0;
+
         bill.setPaidAmount(totalPaid);
         bill.setChangeReturned(change);
-        bill.setBillStatus(BillStatus.PAID);
         bill.setPaidAt(LocalDateTime.now());
         bill.setLoyaltyPointsUsed(pointsUsed);
+
+        // ── Bill status: PAID vs CREDIT_DUE vs PARTIAL_CREDIT ─────────────
+        if (!hasCredit) {
+            bill.setBillStatus(BillStatus.PAID);
+        } else if (creditAmount.compareTo(bill.getTotalAmount()) == 0) {
+            bill.setBillStatus(BillStatus.CREDIT_DUE);       // 100% on credit
+        } else {
+            bill.setBillStatus(BillStatus.PARTIAL_CREDIT);   // cash + credit split
+        }
+
         Bill saved = billRepository.save(bill);
 
         CustomerOrder order = bill.getOrder();
@@ -487,8 +505,13 @@ public class BillingService {
             customerRepository.save(customer);
         }
 
-        log.info("Bill settled: {} — Paid: {}, Change: {}",
-                bill.getBillNumber(), totalPaid, change);
+        // ── Credit ledger DEBIT entry ─────────────────────────────────────
+        if (hasCredit) {
+            creditLedgerService.recordCreditDebit(saved, creditAmount);
+        }
+
+        log.info("Bill settled: {} — Paid: {}, Credit: {}, Status: {}",
+                bill.getBillNumber(), totalPaid, creditAmount, bill.getBillStatus());
         return toBillDto(saved, orderItemRepository.findByOrderId(order.getId()));
     }
 
